@@ -759,7 +759,8 @@ h4 {
 }
 
 .textarea-container .btn {
-  width: 244px;
+  width: 150px;
+  height: 50px;
   margin: 0 auto;
 }
 
@@ -769,7 +770,9 @@ h4 {
   flex-wrap: wrap;
 }
 
-
+.options-question {
+  display: none;
+}
 
 
 .dynamic-form .btn {
@@ -2303,6 +2306,12 @@ Geometria-Bold
     margin: 0 auto;
     padding: 0 12px;
   }
+
+  .textarea-container .btn {
+    width: 244px;
+    height: 60px;
+  }
+
 
   .dynamic-form .input__field {
     height: 60px;

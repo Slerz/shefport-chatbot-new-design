@@ -11,6 +11,9 @@ let botMessageCount = 0;
 let swiperInstance = null;
 let isProcessingBreak = false; // Флаг для отслеживания обработки [BREAK]
 
+// Флаг для отслеживания режима работы (AI или сценарий)
+let isScenarioMode = false;
+
 import startQuestions from './startQuestions.js';
 import messengerOptions from './messengerOptions.js';
 import cityInput from './cityInput.js';
@@ -77,20 +80,35 @@ function clearOptions() {
 // Парсер спецсимволов для markdown-стиля (жирный, списки)
 function parseSpecialFormatting(text) {
   if (typeof text !== 'string') return text;
-  // Экранирование HTML
-  let safe = text.replace(/[&<>]/g, function(tag) {
+  
+  // Сначала обрабатываем специальные теги, которые должны остаться
+  let safe = text;
+  
+  // Защищаем <br> теги от экранирования
+  safe = safe.replace(/<br>/gi, '___BR___');
+  
+  // Экранирование HTML (кроме защищенных тегов)
+  safe = safe.replace(/[&<>]/g, function(tag) {
     const chars = { '&': '&amp;', '<': '&lt;', '>': '&gt;' };
     return chars[tag] || tag;
   });
+  
+  // Восстанавливаем <br> теги
+  safe = safe.replace(/___BR___/g, '<br>');
+  
   // Жирный текст **текст**
   safe = safe.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>');
+  
   // Перенос нумерованных списков (1. ... 2. ...)
   // В начале строки или после \n, ищем "число. " и переносим на новую строку
   safe = safe.replace(/(\d+\.) /g, '\n$1 ');
+  
   // Удаляем лишний перенос в начале
   safe = safe.replace(/^\n+/, '');
+  
   // Переводим \n в <br>
   safe = safe.replace(/\n/g, '<br>');
+  
   return safe;
 }
 
@@ -225,7 +243,10 @@ function appendMessage({ text, value, key, isUser, skipScroll, isBreakPart }) {
         botNotificationSound.play();
         if (!skipScroll) smoothScrollToBottom();
       }
-      renderModuleOptionsWithAI(key || 'messenger', messengerOptions);
+      renderModuleOptionsWithAI(key || 'messenger', messengerOptions, (value, next) => {
+        // Callback для обработки выбора мессенджера
+        if (next) processChatState(next);
+      });
       if (after) {
         const message = document.createElement("div");
         message.className = `message bot-message`;
@@ -315,7 +336,11 @@ function appendMessage({ text, value, key, isUser, skipScroll, isBreakPart }) {
         botNotificationSound.play();
         if (!skipScroll) smoothScrollToBottom();
       }
-      renderNameInput(key || 'name', () => {});
+      if (isScenarioMode) {
+        renderNameInput(key || 'name', () => {});
+      } else {
+        renderNameInputWithAI(key || 'name', 'end');
+      }
       if (after) {
         const message = document.createElement("div");
         message.className = `message bot-message`;
@@ -442,6 +467,7 @@ async function appendBotMessageWithDelay(message, key) {
 
   isBotBusy = true;
 
+  // Показываем индикатор печати в обоих режимах
   await showTypingIndicator(delayMap[message.type] || 0);
   await new Promise(resolve => setTimeout(resolve, 280));
 
@@ -449,7 +475,9 @@ async function appendBotMessageWithDelay(message, key) {
 
   switch(message.type) {
     case 'text':
-      appendMessage({ text: message.value, key: key });
+      // Применяем форматирование для текстовых сообщений
+      const formattedText = parseSpecialFormatting(message.value);
+      appendMessage({ text: formattedText, key: key });
       break;
     case 'swiper':
       renderGallerySwiper(message.value);
@@ -458,21 +486,44 @@ async function appendBotMessageWithDelay(message, key) {
       renderOptions(key, message.value);
       break;
     case 'yesno':
-      renderYesNoOptionsWithAI(key, message.next);
+      if (isScenarioMode) {
+        renderYesNoOptions(key, message.next);
+      } else {
+        renderYesNoOptionsWithAI(key, message.next);
+      }
       break;
     case 'startQuestions':
-      renderModuleOptionsWithAI('startQuestions', startQuestions);
+      if (isScenarioMode) {
+        renderModuleOptions('startQuestions', startQuestions);
+      } else {
+        renderModuleOptionsWithAI('startQuestions', startQuestions);
+      }
       break;
   }
 
   isBotBusy = false;
 }
 
-function renderOptions(key, options) {
+function renderOptions(key, options, showQuestion = true) {
   clearOptions();
 
   const responseContainer = document.createElement("div");
   responseContainer.className = "response-options";
+
+  // Если showQuestion === true, выводим вопрос над кнопками (берём из сценария)
+  if (showQuestion) {
+    // Найдём текст вопроса из сценария, если есть
+    const state = chatScenario[key];
+    if (state && state.messages && state.messages.length > 0) {
+      const lastMsg = state.messages[state.messages.length - 1];
+      if (lastMsg.type === 'text') {
+        const questionDiv = document.createElement("div");
+        questionDiv.className = "options-question";
+        questionDiv.innerHTML = parseSpecialFormatting(lastMsg.value);
+        responseContainer.appendChild(questionDiv);
+      }
+    }
+  }
 
   options.forEach(({ label, value, next }) => {
     const button = document.createElement("button");
@@ -741,11 +792,14 @@ function renderPhoneInput(key, callback) {
     submitHandler: function () {
       const phoneNumber = inputField.value.trim();
       inputContainer.remove();
-      appendMessage({ text: phoneNumber, key: key, isUser: true });
+      
+      // Добавляем сообщение пользователя только в сценарном режиме
+      if (isScenarioMode) {
+        appendMessage({ text: phoneNumber, key: key, isUser: true });
+      }
+      
       // Переходим к следующему шагу сценария
       if (callback) callback(phoneNumber);
-      const state = chatScenario[key];
-      if (state && state.next) processChatState(state.next);
     },
   });
 
@@ -840,8 +894,7 @@ function renderNameInput(key, callback) {
   inputGroup.appendChild(inputField);
   inputGroup.appendChild(submitButton);
 
-  form.appendChild(inputField);
-  form.appendChild(submitButton);
+  form.appendChild(inputGroup);
   inputContainer.appendChild(form);
 
   chatContent.appendChild(inputContainer);
@@ -860,11 +913,12 @@ function renderNameInput(key, callback) {
     submitHandler: function () {
       const userName = inputField.value.trim();
       inputContainer.remove();
+      
+      // Добавляем сообщение пользователя в обоих режимах
       appendMessage({ text: userName, key: key, isUser: true });
+      
       // Переходим к следующему шагу сценария
       if (callback) callback(userName);
-      const state = chatScenario[key];
-      if (state && state.next) processChatState(state.next);
     },
   });
 }
@@ -874,7 +928,6 @@ async function processChatState(stateKey) {
   if (!state) return;
 
   const { messages, showStatus, options, requiresInput, autoNext, actionRedirect, action } = state;
-
 
   if (showStatus) {
     setTimeout(() => {
@@ -893,22 +946,48 @@ async function processChatState(stateKey) {
       const phoneKeys = ['phone', 'questionFranchise']
       if (requiresInput) {
         if (phoneKeys.includes(stateKey.replace(/\d/g, ''))) {
-          renderPhoneInputWithAI(stateKey, (phoneNumber) => {
-            processChatState(state.next);
-          });
+          // В сценарном режиме используем обычную функцию renderPhoneInput
+          if (isScenarioMode) {
+            renderPhoneInput(stateKey, (phoneNumber) => {
+              processChatState(state.next);
+            });
+          } else {
+            renderPhoneInputWithAI(stateKey, (phoneNumber) => {
+              processChatState(state.next);
+            });
+          }
         } else if (stateKey.includes("name")) {
-          renderNameInput(stateKey, () => {});
+          // В сценарном режиме используем обычную функцию renderNameInput
+          if (isScenarioMode) {
+            renderNameInput(stateKey, (userName) => {
+              processChatState(state.next);
+            });
+          } else {
+            renderNameInputWithAI(stateKey, state.next);
+          }
         } else if (stateKey.includes("city")) {
-          renderCityInputWithAI(stateKey, (userName) => {
-            processChatState(state.next);
-          });
+          // В сценарном режиме используем обычную функцию renderCityInput
+          if (isScenarioMode) {
+            renderCityInput(stateKey, (userCity) => {
+              processChatState(state.next);
+            });
+          } else {
+            renderCityInputWithAI(stateKey, (userName) => {
+              processChatState(state.next);
+            });
+          }
         } else {
           renderTextInput(stateKey, (userInput) => {
             processChatState(state.next);
           });
         }
       } else if (options && options.length > 0) {
-        renderOptions(stateKey, options);
+        // Если последнее сообщение типа text, не дублируем вопрос над кнопками
+        let showQuestion = true;
+        if (messages.length > 0 && messages[messages.length-1].type === 'text') {
+          showQuestion = false;
+        }
+        renderOptions(stateKey, options, showQuestion);
       } else if (action) {
         action();
       }
@@ -1019,10 +1098,17 @@ function setCurrentYear() {
 
 document.addEventListener("DOMContentLoaded", () => {
   setInitialFeedbackStore();
-  processChatState("start");
+  // Запускаем сценарный режим только если нет AI
+  // processChatState("start"); // Убираем отсюда, будет запускаться только при переключении
 
   setCurrentYear()
   initAnchorBtn()
+  
+  // Показываем поле ввода в AI-режиме (по умолчанию)
+  const inputBar = document.querySelector('.chat__input-bar');
+  if (inputBar) {
+    inputBar.style.display = 'flex';
+  }
 
   // === Chat input send logic ===
   const userInput = document.getElementById('userChatInput');
@@ -1062,7 +1148,13 @@ function renderModuleOptions(key, options, callback) {
     button.onclick = () => {
       if (isBotBusy) return;
       clearOptions();
-      if (key === 'startQuestions') {
+      
+      if (isScenarioMode) {
+        // В сценарном режиме добавляем сообщение пользователя вручную
+        appendMessage({ text: label, isUser: true });
+        // В сценарном режиме всегда используем processChatState
+        processChatState(next);
+      } else if (key === 'startQuestions') {
         sendMessageToAI(label);
       } else if (callback) {
         callback(value, next);
@@ -1093,6 +1185,11 @@ const sessionId = getSessionId();
 
 // Отправка сообщения пользователя и получение ответа от OpenAI backend
 async function sendMessageToAI(userMessage) {
+  // Если уже в сценарном режиме, не отправляем в AI
+  if (isScenarioMode) {
+    return;
+  }
+
   if (userMessage === "__INIT__") {
     // Не отображаем и не отправляем в историю, только инициируем диалог с ботом
     try {
@@ -1106,10 +1203,12 @@ async function sendMessageToAI(userMessage) {
         await new Promise(resolve => setTimeout(resolve, 300));
         appendMessage({ text: data.text, isUser: false });
       } else if (data.error) {
-        appendMessage({ text: 'Ошибка: ' + data.error, isUser: false });
+        console.log('Ошибка AI: ' + data.error);
+        switchToScenarioMode();
       }
     } catch (e) {
-      appendMessage({ text: 'Ошибка соединения с сервером.', isUser: false });
+      console.log('Ошибка соединения с сервером AI:', e);
+      switchToScenarioMode();
     }
     return;
   }
@@ -1142,12 +1241,14 @@ async function sendMessageToAI(userMessage) {
         hideTypingIndicator();
       }, 600);
     } else if (data.error) {
-      appendMessage({ text: 'Ошибка: ' + data.error, isUser: false });
+      console.log('Ошибка AI: ' + data.error);
       hideTypingIndicator();
+      switchToScenarioMode();
     }
   } catch (e) {
-    appendMessage({ text: 'Ошибка соединения с сервером.', isUser: false });
+    console.log('Ошибка соединения с сервером AI:', e);
     hideTypingIndicator();
+    switchToScenarioMode();
   }
 }
 
@@ -1159,7 +1260,15 @@ function handleUserSend() {
   const message = userInput.value.trim();
   if (!message) return;
   userInput.value = '';
-  sendMessageToAI(message);
+  
+  if (isScenarioMode) {
+    // В сценарном режиме обрабатываем как свободный вопрос
+    appendMessage({ text: message, isUser: true });
+    // Переходим к обработке вопроса в сценарии
+    processChatState("question");
+  } else {
+    sendMessageToAI(message);
+  }
 }
 
 userInput.addEventListener('keydown', function(e) {
@@ -1193,27 +1302,79 @@ function renderCityInputWithAI(key, next) {
   });
 }
 
+function renderNameInputWithAI(key, next) {
+  renderNameInput(key, (userName) => {
+    // В AI-режиме имя просто добавляется в чат и переходим к следующему состоянию сценария
+    // (без отправки в sendMessageToAI, так как после имени должны быть заскриптованные сообщения)
+    if (next) processChatState(next);
+  });
+}
+
 function renderPhoneInputWithAI(key, next) {
   renderPhoneInput(key, (userPhone) => {
-    // НЕ отправляем номер в sendMessageToAI!
-    if (next) processChatState(next);
+    // В AI-режиме отправляем номер в sendMessageToAI и только после ответа переходим к следующему состоянию
+    if (!isScenarioMode) {
+      sendMessageToAI(userPhone, () => {
+        if (next) processChatState(next);
+      });
+    } else {
+      // В сценарном режиме просто переходим к следующему состоянию
+      if (next) processChatState(next);
+    }
   });
 }
 
 function renderModuleOptionsWithAI(key, options, callback) {
   renderModuleOptions(key, options, (value, next) => {
-    if (key === 'startQuestions') {
-      sendMessageToAI(value, () => {
-        if (next) processChatState(next);
-      });
-    } else if (key === 'messenger') {
-      sendMessageToAI(value, () => {
-        if (next) processChatState(next);
-      });
-    } else if (callback) {
-      callback(value, next);
-    } else if (next) {
-      processChatState(next);
+    if (isScenarioMode) {
+      // В сценарном режиме переходим к следующему состоянию (сообщение уже добавлено в renderModuleOptions)
+      if (callback) {
+        callback(value, next);
+      } else if (next) {
+        processChatState(next);
+      }
+    } else {
+      // В AI-режиме не добавляем сообщение вручную, только через sendMessageToAI
+      if (key === 'startQuestions' || key === 'messenger') {
+        // Для мессенджера нужно найти соответствующий label по value
+        let messageToSend = value;
+        let nextState = next;
+        if (key === 'messenger') {
+          const option = options.find(opt => opt.value === value);
+          messageToSend = option ? option.label : value;
+          nextState = option ? option.next : next;
+        }
+        sendMessageToAI(messageToSend, () => {
+          if (nextState) processChatState(nextState);
+        });
+      } else if (callback) {
+        callback(value, next);
+      } else if (next) {
+        processChatState(next);
+      }
     }
   });
+}
+
+// Функция для переключения на сценарный режим
+function switchToScenarioMode() {
+  if (isScenarioMode) return; // Уже в сценарном режиме
+  
+  console.log('Переключение на сценарный режим из-за ошибки подключения к бэкенду');
+  isScenarioMode = true;
+  
+  // Очищаем текущие опции
+  clearOptions();
+  
+  // Скрываем индикатор печати если он активен
+  hideTypingIndicator();
+  
+  // Скрываем поле ввода в сценарном режиме
+  const inputBar = document.querySelector('.chat__input-bar');
+  if (inputBar) {
+    inputBar.style.display = 'none';
+  }
+  
+  // Запускаем сценарный режим с начального состояния
+  processChatState("start");
 }
